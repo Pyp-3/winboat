@@ -1371,8 +1371,8 @@ function finishSetup() {
 }
 
 @media (max-width: 960px) {
-    .setup-wizard { grid-template-columns: minmax(0, 1fr); }
-    .setup-artwork { display: none; }
+    .setup-layout .setup-wizard { grid-template-columns: minmax(0, 1fr); }
+    .setup-layout .setup-artwork { display: none; }
 }
 
 .prerequisite-refresh-progress {
