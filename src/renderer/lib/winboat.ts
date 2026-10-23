@@ -100,6 +100,15 @@ const QMP_WAIT_MS = 2000;
 const FETCH_TIMEOUT = 1000;
 const GUEST_ONLINE_TIMEOUT_MS = 60_000;
 
+/** Background requests commonly race Windows boot/shutdown; callers keep polling. */
+export function logGuestPollFailure(operation: string, error: unknown) {
+    const failure = error as { name?: string; code?: string; message?: string };
+    const transient = failure?.name === "AbortError" || ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EHOSTUNREACH"].includes(failure?.code ?? "");
+    const message = `[${operation}] Guest request failed; polling will retry: ${failure?.message ?? String(error)}`;
+    if (transient) logger.debug(message);
+    else logger.warn(message);
+}
+
 class AppManager {
     appCache: WinApp[] = [];
     appUsageCache: { [key: string]: number } = {};
@@ -114,7 +123,8 @@ class AppManager {
     }
 
     async updateAppCache(options: { forceRead?: boolean } = {}) {
-        const res = await nodeFetch(`${WINBOAT_API_URL}/apps`, { headers: guestAuthHeaders() });
+        const res = await nodeFetch(`${WINBOAT_API_URL}/apps`, { headers: guestAuthHeaders(), signal: AbortSignal.timeout(10000) });
+        if (!res.ok) throw new Error(`App list returned HTTP ${res.status}`);
         const newApps = (await res.json()) as WinApp[];
         newApps.push(...presetApps, ...this.#wbConfig!.config.customApps);
 
@@ -310,14 +320,20 @@ export class Winboat {
         }
 
         this.#healthInterval = setInterval(async () => {
-            const _isOnline = await this.getHealth();
-            if (_isOnline !== this.isOnline.value) {
-                this.isOnline.value = _isOnline;
-                logger.info(`Winboat Guest API went ${this.isOnline.value ? "online" : "offline"}`);
+            try {
+                const _isOnline = await this.getHealth();
+                if (_isOnline !== this.isOnline.value) {
+                    this.isOnline.value = _isOnline;
+                    logger.info(`Winboat Guest API went ${this.isOnline.value ? "online" : "offline"}`);
 
-                if (this.isOnline.value) {
-                    await this.checkVersionAndUpdateGuestServer();
+                    if (this.isOnline.value) {
+                        await this.checkVersionAndUpdateGuestServer();
+                    }
                 }
+            } catch (error) {
+                // Version/update failures must not reject the timer callback.
+                // The next offline -> online transition retries the version check.
+                logger.warn("Guest version/update check failed; it will retry when Windows reconnects", error);
             }
         }, HEALTH_WAIT_MS);
 
@@ -331,7 +347,11 @@ export class Winboat {
         this.#metricsInverval = setInterval(async () => {
             // If the guest is offline or updating, don't bother checking metrics
             if (!this.isOnline.value || this.isUpdatingGuestServer.value) return;
-            this.metrics.value = await this.getMetrics();
+            try {
+                this.metrics.value = await this.getMetrics();
+            } catch (error) {
+                logGuestPollFailure("metrics", error);
+            }
         }, METRICS_WAIT_MS);
 
         // *** RDP Connection Status Interval ***
@@ -351,11 +371,14 @@ export class Winboat {
                 return;
             }
 
-            // Check RDP status
-            const _rdpConnected = await this.getRDPConnectedStatus();
-            if (_rdpConnected !== this.rdpConnected.value) {
-                this.rdpConnected.value = _rdpConnected;
-                logger.info(`RDP connection status changed to ${_rdpConnected ? "connected" : "disconnected"}`);
+            try {
+                const _rdpConnected = await this.getRDPConnectedStatus();
+                if (_rdpConnected !== this.rdpConnected.value) {
+                    this.rdpConnected.value = _rdpConnected;
+                    logger.info(`RDP connection status changed to ${_rdpConnected ? "connected" : "disconnected"}`);
+                }
+            } catch (error) {
+                logGuestPollFailure("RDP status", error);
             }
         }, RDP_STATUS_WAIT_MS);
 
@@ -430,6 +453,7 @@ export class Winboat {
             headers: guestAuthHeaders(),
             signal: AbortSignal.timeout(FETCH_TIMEOUT),
         });
+        if (!res.ok) throw new Error(`Metrics returned HTTP ${res.status}`);
         const metrics = (await res.json()) as Metrics;
         return metrics;
     }
@@ -439,6 +463,7 @@ export class Winboat {
             headers: guestAuthHeaders(),
             signal: AbortSignal.timeout(FETCH_TIMEOUT),
         });
+        if (!res.ok) throw new Error(`RDP status returned HTTP ${res.status}`);
         const status = (await res.json()) as { rdpConnected: boolean };
         return status.rdpConnected;
     }
@@ -747,7 +772,8 @@ export class Winboat {
 
     async checkVersionAndUpdateGuestServer() {
         // 1. Compare the running Guest Server version with the bundled app version.
-        const versionRes = await nodeFetch(`${WINBOAT_API_URL}/version`, { headers: guestAuthHeaders() });
+        const versionRes = await nodeFetch(`${WINBOAT_API_URL}/version`, { headers: guestAuthHeaders(), signal: AbortSignal.timeout(5000) });
+        if (!versionRes.ok) throw new Error(`Guest version returned HTTP ${versionRes.status}`);
         const version = (await versionRes.json()) as GuestServerVersion;
         const appVersion = import.meta.env.VITE_APP_VERSION;
 

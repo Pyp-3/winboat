@@ -107,7 +107,7 @@
             <x-label class="text-neutral-300">Apps</x-label>
             <div class="flex flex-row gap-2 justify-center items-center">
                 <!-- Refresh button -->
-                <x-button class="flex flex-row gap-1 items-center" @click="refreshApps">
+                <x-button class="flex flex-row gap-1 items-center" @click="refreshApps()">
                     <Icon icon="mdi:refresh" class="size-4"></Icon>
                     <x-label>Refresh</x-label>
                 </x-button>
@@ -181,6 +181,7 @@
                 </x-input>
             </div>
         </div>
+        <p v-if="refreshError" role="alert" class="text-amber-300 mb-4">{{ refreshError }}</p>
         <div v-if="winboat.isOnline.value" class="px-2">
             <TransitionGroup
                 v-if="apps.length"
@@ -254,8 +255,8 @@
 
 <script setup lang="ts">
 import { Icon } from "@iconify/vue";
-import { computed, onMounted, ref, useTemplateRef, watch, nextTick } from "vue";
-import { Winboat } from "../lib/winboat";
+import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch, nextTick } from "vue";
+import { Winboat, logGuestPollFailure } from "../lib/winboat";
 import { ContainerStatus } from "../lib/containers/common";
 import { type WinApp } from "../../types";
 import WBContextMenu from "../components/WBContextMenu.vue";
@@ -271,6 +272,10 @@ const FormData: typeof import("form-data") = require("form-data");
 
 const winboat = Winboat.getInstance();
 const apps = ref<WinApp[]>([]);
+const refreshError = ref("");
+let refreshRetry: ReturnType<typeof setTimeout> | undefined;
+let refreshingApps = false;
+let disposed = false;
 const searchInput = ref("");
 const sortBy = ref("");
 const filterBy = ref("all");
@@ -326,15 +331,14 @@ const computedApps = computed(() => {
     return appsCache;
 });
 
-onMounted(async () => {
+onMounted(() => {
     sortBy.value = WinboatConfig.getInstance().config.appsSortOrder;
 
-    await refreshApps();
+    void refreshApps(true);
 
     watch(winboat.isOnline, async (newVal, _) => {
         if (newVal) {
-            await refreshApps();
-            console.log("Apps list: ", apps.value);
+            await refreshApps(true);
         }
     });
 
@@ -348,15 +352,30 @@ onMounted(async () => {
     window.addEventListener("resize", onScroll);
 });
 
-async function refreshApps() {
-    if (winboat.isOnline.value) {
-        const loadedApps = await winboat.appMgr!.getApps();
-        apps.value = loadedApps.map(app => ({
-            ...app,
-            id: crypto.randomUUID(),
-        }));
-        // Run in background, won't impact UX
+onUnmounted(() => {
+    disposed = true;
+    if (refreshRetry) clearTimeout(refreshRetry);
+});
+
+async function refreshApps(background = false) {
+    if (!winboat.isOnline.value || refreshingApps || disposed) return;
+    if (refreshRetry) clearTimeout(refreshRetry);
+    refreshingApps = true;
+    try {
+        await winboat.appMgr!.getApps();
         await winboat.appMgr!.updateAppCache();
+        if (!disposed) {
+            apps.value = winboat.appMgr!.appCache.map(app => ({ ...app, id: crypto.randomUUID() }));
+            refreshError.value = "";
+        }
+    } catch (error) {
+        logGuestPollFailure("app list", error);
+        if (!background) refreshError.value = "Could not refresh Windows apps. Retrying when the guest responds.";
+        if (!disposed && winboat.isOnline.value) {
+            refreshRetry = setTimeout(() => { void refreshApps(true); }, 3000);
+        }
+    } finally {
+        refreshingApps = false;
     }
 }
 
