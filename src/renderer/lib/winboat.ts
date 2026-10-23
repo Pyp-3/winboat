@@ -1,3 +1,4 @@
+import { getInstallationStore } from "./installations";
 import { assert } from "@vueuse/core";
 import { ref, type Ref } from "vue";
 import YAML from "yaml";
@@ -10,7 +11,7 @@ import { setIntervalImmediately } from "../utils/interval";
 import { createLogger } from "../utils/log";
 import { openLink } from "../utils/openLink";
 import { MultiMonitorMode, WinboatConfig } from "./config";
-import { HOST_QMP_PORT, HOST_RDP_PORT, NOVNC_URL, WINBOAT_API_URL, WINBOAT_DIR, WINBOAT_UPDATE_URL } from "./constants";
+import { ACTIVE_INSTALLATION, HOST_QMP_PORT, HOST_RDP_PORT, NOVNC_URL, WINBOAT_API_URL, WINBOAT_DIR, WINBOAT_UPDATE_URL, refreshActiveInstallationPorts } from "./constants";
 import { ContainerRuntimes, createContainer } from "./containers/common";
 import { ContainerManager, ContainerStatus, isStaleContainerError } from "./containers/container";
 import { ExecFileAsyncError } from "./exec-helper";
@@ -290,6 +291,13 @@ export class Winboat {
      */
     async createAPIIntervals() {
         logger.info("Creating Winboat API intervals...");
+        try {
+            await refreshActiveInstallationPorts();
+        } catch (error) {
+            logger.error("Could not resolve this installation's published ports", error);
+            this.containerStatus.value = ContainerStatus.ERROR;
+            return;
+        }
         const HEALTH_WAIT_MS = 1000;
         const METRICS_WAIT_MS = 1000;
         const RDP_STATUS_WAIT_MS = 1000;
@@ -539,6 +547,8 @@ export class Winboat {
                     throw e;
                 }
             }
+            // Clear a previous action error so polling can observe Running again.
+            this.containerStatus.value = ContainerStatus.CREATED;
         } catch (e) {
             logger.error("There was an error performing the container action.");
             logger.error(e);
@@ -554,6 +564,7 @@ export class Winboat {
         this.containerActionLoading.value = true;
         try {
             await this.containerMgr!.container("stop");
+            this.containerStatus.value = ContainerStatus.CREATED;
             logger.info("Successfully stopped WinBoat container");
         } finally {
             this.containerActionLoading.value = false;
@@ -576,6 +587,7 @@ export class Winboat {
                     throw e;
                 }
             }
+            this.containerStatus.value = ContainerStatus.CREATED;
             logger.info("Successfully restarted WinBoat container");
         } catch (e) {
             logger.error("There was an error restarting the container.");
@@ -603,6 +615,7 @@ export class Winboat {
         this.containerActionLoading.value = true;
         try {
             await this.containerMgr!.container("unpause");
+            this.containerStatus.value = ContainerStatus.CREATED;
             logger.info("Successfully unpaused WinBoat container");
         } finally {
             this.containerActionLoading.value = false;
@@ -615,80 +628,36 @@ export class Winboat {
         @note Use {@link ContainerManager.writeCompose} in case only disk write is needed
     */
     async replaceCompose(composeConfig: ComposeConfig) {
+        // Check before stopping or recreating the existing container. In particular,
+        // an unavailable second runtime must not disrupt a working installation.
+        await getInstallationStore().assertCanStart(ACTIVE_INSTALLATION.id);
         logger.info("Going to replace compose config");
         this.containerActionLoading.value = true;
-
-        const composeFilePath = this.containerMgr!.composeFilePath;
-
-        // 0. Stop the current container if it's online
-        if (this.containerStatus.value === ContainerStatus.RUNNING) {
-            await this.stopContainer();
+        try {
+            const composeFilePath = this.containerMgr!.composeFilePath;
+            const status = await this.containerMgr!.getStatus();
+            if (status === ContainerStatus.RUNNING || status === ContainerStatus.PAUSED) {
+                await this.stopContainer();
+                this.containerActionLoading.value = true;
+            }
+            await this.containerMgr!.compose("down");
+            const backupDir = path.join(WINBOAT_DIR, "backup");
+            fs.mkdirSync(backupDir, { recursive: true });
+            const backupFile = `${Date.now()}-${path.basename(composeFilePath)}`;
+            // Copy before writing, so a failed write never leaves the only compose
+            // file missing. Disk images are not part of this operation.
+            fs.copyFileSync(composeFilePath, path.join(backupDir, backupFile));
+            this.containerMgr!.writeCompose(composeConfig);
+            await this.containerMgr!.compose("up");
+            this.containerStatus.value = ContainerStatus.CREATED;
+            logger.info("Replace compose config completed, successfully deployed new container");
+        } finally {
+            this.containerActionLoading.value = false;
         }
-
-        // 1. Compose down the current container
-        await this.containerMgr!.compose("down");
-
-        // 2. Create a backup directory if it doesn't exist
-        const backupDir = path.join(WINBOAT_DIR, "backup");
-
-        if (!fs.existsSync(backupDir)) {
-            fs.mkdirSync(backupDir);
-            logger.info(`Created compose backup dir: ${backupDir}`);
-        }
-
-        // 3. Move the current compose file to backup
-        const backupFile = `${Date.now()}-${path.basename(this.containerMgr!.composeFilePath)}`;
-        fs.renameSync(composeFilePath, path.join(backupDir, backupFile));
-        logger.info(`Backed up current compose at: ${path.join(backupDir, backupFile)}`);
-
-        // 4. Write new compose file
-        this.containerMgr!.writeCompose(composeConfig);
-        logger.info(`Wrote new compose file to: ${composeFilePath}`);
-
-        // 5. Deploy the container with the new compose file
-        await this.containerMgr!.compose("up");
-
-        logger.info("Replace compose config completed, successfully deployed new container");
-
-        this.containerActionLoading.value = false;
     }
 
     async resetWinboat() {
-        console.info("Resetting Winboat...");
-
-        // 1. Stop container
-        await this.stopContainer();
-        console.info("Stopped container");
-
-        // 2. Remove the container
-
-        await this.containerMgr!.remove();
-        console.info("Removed container");
-
-        // 3. Remove the container volume or folder
-        const compose = Winboat.readCompose(this.containerMgr!.composeFilePath);
-        const storage = compose.services.windows.volumes.find(vol => vol.includes("/storage"));
-        if (storage?.startsWith("data:")) {
-            if (this.#wbConfig?.config.containerRuntime !== ContainerRuntimes.DOCKER) {
-                logger.error("Volume not supported on podman runtime");
-            }
-            // In this case we have a volume (legacy)
-            await execAsync("docker volume rm winboat_data");
-            console.info("Removed volume");
-        } else {
-            const storageFolder = storage?.split(":").at(0) ?? null;
-            if (storageFolder && fs.existsSync(storageFolder)) {
-                fs.rmSync(storageFolder, { recursive: true, force: true });
-                console.info(`Removed storage folder at ${storageFolder}`);
-            } else {
-                console.warn("Storage folder does not exist, skipping removal");
-            }
-        }
-
-        // 4. Remove WinBoat directory
-        fs.rmSync(WINBOAT_DIR, { recursive: true, force: true });
-        console.info(`Removed ${WINBOAT_DIR}`);
-        console.info("So long and thanks for all the fish!");
+        throw new Error("Deleting Windows disks is disabled in the installations manager. Your installations and their files are preserved.");
     }
 
     async launchApp(app: WinApp) {

@@ -53,26 +53,22 @@ const windowStore = new Store<SchemaType>({
 });
 
 let mainWindow: BrowserWindow | null = null;
+let switchingInstallation = false;
+const startupRoutes = ["/home", "/setup", "/installations"] as const;
+type StartupRoute = typeof startupRoutes[number];
+const primaryInstance = app.requestSingleInstanceLock();
+if (!primaryInstance) app.quit();
 
-function createWindow() {
-    if (!app.requestSingleInstanceLock()) {
-        // @ts-ignore property "window" is optional, see: [dialog.showMessageBoxSync](https://www.electronjs.org/docs/latest/api/dialog#dialogshowmessageboxsyncwindow-options)
-        dialog.showMessageBoxSync(null, {
-            type: "error",
-            buttons: ["Close"],
-            title: "WinBoat",
-            message: "An instance of WinBoat is already running.\n\tMultiple Instances are not allowed.",
-        });
-        app.exit();
-    }
-
-    mainWindow = new BrowserWindow({
+async function createWindow(startupRoute: StartupRoute = "/installations", previousWindow: BrowserWindow | null = null) {
+    const previousBounds = previousWindow?.getBounds();
+    const win = new BrowserWindow({
         minWidth: WINDOW_MIN_WIDTH,
         minHeight: WINDOW_MIN_HEIGHT,
-        width: windowStore.get("dimensions.width"),
-        height: windowStore.get("dimensions.height"),
-        x: windowStore.get("position.x"),
-        y: windowStore.get("position.y"),
+        width: previousBounds?.width ?? windowStore.get("dimensions.width"),
+        height: previousBounds?.height ?? windowStore.get("dimensions.height"),
+        x: previousBounds?.x ?? windowStore.get("position.x"),
+        y: previousBounds?.y ?? windowStore.get("position.y"),
+        show: false,
         transparent: false,
         frame: false,
         webPreferences: {
@@ -82,32 +78,75 @@ function createWindow() {
         },
     });
 
-    mainWindow.on("close", () => {
-        const bounds = mainWindow?.getBounds();
+    win.on("close", () => {
+        const bounds = win.getBounds();
 
         windowStore.set("dimensions", {
-            width: bounds?.width,
-            height: bounds?.height,
+            width: bounds.width,
+            height: bounds.height,
         });
 
         windowStore.set("position", {
-            x: bounds?.x,
-            y: bounds?.y,
+            x: bounds.x,
+            y: bounds.y,
         });
     });
 
-    enable(mainWindow.webContents);
+    win.on("closed", () => {
+        if (mainWindow === win) mainWindow = null;
+    });
+    enable(win.webContents);
 
-    if (process.env.NODE_ENV === "development") {
-        const rendererPort = process.argv[2];
-        mainWindow.loadURL(`http://localhost:${rendererPort}`);
-    } else {
-        mainWindow.loadFile(join(app.getAppPath(), "renderer", "index.html"));
+    // Native Node modules (notably USB) cannot safely survive a renderer reload.
+    // A new BrowserWindow receives a fresh renderer process and isolated singletons.
+    let timeout: NodeJS.Timeout | undefined;
+    const ready = new Promise<void>(resolve => win.once("ready-to-show", () => resolve()));
+    const load = process.env.NODE_ENV === "development"
+        ? win.loadURL(`http://localhost:${process.argv[2]}?startupRoute=${encodeURIComponent(startupRoute)}`)
+        : win.loadFile(join(app.getAppPath(), "renderer", "index.html"), { query: { startupRoute } });
+    try {
+        await Promise.race([
+            Promise.all([load, ready]),
+            new Promise<never>((_, reject) => {
+                timeout = setTimeout(() => reject(new Error("The new installation window did not finish loading.")), 30000);
+            }),
+        ]);
+        mainWindow = win;
+        if (previousWindow?.isMaximized()) win.maximize();
+        win.show();
+        if (previousWindow && !previousWindow.isDestroyed()) previousWindow.close();
+        return win;
+    } catch (error) {
+        if (!win.isDestroyed()) win.destroy();
+        throw error;
+    } finally {
+        if (timeout) clearTimeout(timeout);
     }
 }
 
+ipcMain.on("winboat:open-installation", async (event, route: unknown) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame || switchingInstallation ||
+        !startupRoutes.includes(route as StartupRoute)) return;
+    switchingInstallation = true;
+    const previousWindow = mainWindow;
+    try {
+        await createWindow(route as StartupRoute, previousWindow);
+    } catch (error) {
+        if (!previousWindow.isDestroyed()) {
+            await dialog.showMessageBox(previousWindow, {
+                type: "error",
+                title: "Could not open installation",
+                message: "The previous window has been preserved. Close and reopen WinBoat to load the selected installation.",
+                detail: error instanceof Error ? error.message : String(error),
+            });
+        }
+    } finally {
+        switchingInstallation = false;
+    }
+});
+
 app.whenReady().then(() => {
-    createWindow();
+    if (!primaryInstance) return;
 
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
         callback({
@@ -125,11 +164,17 @@ app.whenReady().then(() => {
         });
     });
 
+    const openInitialWindow = () => createWindow().catch(error => {
+        dialog.showErrorBox("Could not start WinBoat", error instanceof Error ? error.message : String(error));
+        app.quit();
+    });
+    void openInitialWindow();
+
     app.on("activate", function () {
         // On macOS it's common to re-create a window in the app when the
         // dock icon is clicked and there are no other windows open.
         if (BrowserWindow.getAllWindows().length === 0) {
-            createWindow();
+            void openInitialWindow();
         }
     });
 });

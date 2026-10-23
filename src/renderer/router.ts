@@ -7,10 +7,12 @@ import About from "./views/About.vue";
 import Blank from "./views/Blank.vue";
 import Config from "./views/Config.vue";
 import Migration from "./views/Migration.vue";
+import Installations from "./views/Installations.vue";
 
 export const routes: RouteRecordRaw[] = [
     { path: "/", name: "Loading", component: Blank, meta: { icon: "line-md:loading-loop" } },
     { path: "/home", name: "Home", component: Home, meta: { icon: "fluent:home-32-filled" } },
+    { path: "/installations", name: "Installations", component: Installations, meta: { icon: "fluent:desktop-24-filled" } },
     { path: "/migration", name: "Migration", component: Migration, meta: { icon: "fluent:home-32-filled" } },
     { path: "/setup", name: "SetupUI", component: SetupUI, meta: { icon: "fluent-mdl2:install-to-drive" } },
     { path: "/apps", name: "Apps", component: Apps, meta: { icon: "fluent:apps-32-filled" } },

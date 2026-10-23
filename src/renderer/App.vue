@@ -115,14 +115,17 @@
                         <x-label class="text-[0.8rem]">Local Account</x-label>
                     </div>
                 </div>
+                <RouterLink to="/installations" class="mx-4 mb-4 p-3 rounded-xl bg-violet-400/10 border border-violet-400/20">
+                    <span class="block text-xs text-violet-300 mb-1">Selected installation</span>
+                    <span class="block font-semibold break-words">{{ activeInstallation.name }}</span>
+                    <span class="block text-xs text-neutral-400 mt-1">Manage Windows installations</span>
+                </RouterLink>
                 <RouterLink
-                    v-for="route of routes.filter(
-                        (r: RouteRecordRaw) => !['SetupUI', 'Loading', 'Migration'].includes(String(r.name)),
-                    )"
+                    v-for="route of visibleRoutes"
                     :to="route.path"
                     :key="route.path"
                 >
-                    <x-navitem>
+                    <x-navitem :toggled="$route.path === route.path">
                         <Icon class="mr-4 w-5 h-5" :icon="(route.meta!.icon as string)" />
                         <x-label>{{ route.name }}</x-label>
                     </x-navitem>
@@ -159,7 +162,7 @@
 import { RouteRecordRaw, RouterLink, useRoute, useRouter } from "vue-router";
 import { routes } from "./router";
 import { Icon } from "@iconify/vue";
-import { onMounted, ref, useTemplateRef, watch, reactive, computed } from "vue";
+import { onMounted, onUnmounted, ref, useTemplateRef, watch, reactive, computed } from "vue";
 import { isInstalled } from "./lib/install";
 import { Winboat } from "./lib/winboat";
 import { openAnchorLink } from "./utils/openLink";
@@ -167,6 +170,7 @@ import { WinboatConfig } from "./lib/config";
 import { USBManager } from "./lib/usbmanager";
 import { NOVNC_URL } from "./lib/constants";
 import { performAutoMigrations } from "./lib/migrate";
+import { getActiveInstallation } from "./lib/installations";
 const { BrowserWindow }: typeof import("@electron/remote") = require("@electron/remote");
 const os: typeof import("os") = require("node:os");
 
@@ -176,6 +180,16 @@ const appVer = import.meta.env.VITE_APP_VERSION;
 const isDev = import.meta.env.DEV;
 let winboat: Winboat | null;
 let wbConfig: WinboatConfig | null;
+const activeInstallation = ref(getActiveInstallation());
+const installationReady = ref(false);
+const visibleRoutes = computed(() => routes.filter((route: RouteRecordRaw) => {
+    if (["SetupUI", "Loading", "Migration"].includes(String(route.name))) return false;
+    return installationReady.value || ["Installations", "About"].includes(String(route.name));
+}));
+
+function refreshActiveInstallation() {
+    activeInstallation.value = getActiveInstallation();
+}
 
 let updateTimeout: NodeJS.Timeout | null = null;
 const manualUpdateRequired = ref(false);
@@ -185,7 +199,10 @@ const updateDialog = useTemplateRef("updateDialog");
 const animationsDisabled = computed(() => wbConfig?.config.disableAnimations);
 
 onMounted(async () => {
+    window.addEventListener("winboat:installations-changed", refreshActiveInstallation);
     const winboatInstalled = await isInstalled();
+    installationReady.value = winboatInstalled;
+    const requestedRoute = new URL(window.location.href).searchParams.get("startupRoute");
 
     if (winboatInstalled) {
         wbConfig = reactive(WinboatConfig.getInstance()); // Instantiate singleton class
@@ -196,11 +213,9 @@ onMounted(async () => {
         $router.push("/migration");
         await performAutoMigrations();
 
-        // After migrations, go to home
-        $router.push("/home");
+        await $router.replace(requestedRoute === "/home" ? "/home" : "/installations");
     } else {
-        console.log("Not installed, redirecting to setup...");
-        $router.push("/setup");
+        await $router.replace(requestedRoute === "/setup" || requestedRoute === "/home" ? "/setup" : "/installations");
     }
 
     // Watch for guest server updates and show dialog
@@ -223,6 +238,11 @@ onMounted(async () => {
             }
         },
     );
+});
+
+onUnmounted(() => {
+    window.removeEventListener("winboat:installations-changed", refreshActiveInstallation);
+    if (updateTimeout) clearTimeout(updateTimeout);
 });
 
 function handleMinimize() {

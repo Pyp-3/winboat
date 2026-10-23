@@ -1,7 +1,8 @@
 import { ComposeConfig } from "../../../types";
 import { DOCKER_DEFAULT_COMPOSE } from "../../data/docker";
 import { capitalizeFirstLetter } from "../../utils/capitalize";
-import { WINBOAT_DIR } from "../constants";
+import { ACTIVE_INSTALLATION, WINBOAT_DIR, refreshActiveInstallationPorts } from "../constants";
+import { withInstallationStart } from "../installations";
 import {
     ComposeArguments,
     ComposeDirection,
@@ -24,8 +25,8 @@ export type DockerSpecs = {
 };
 
 export class DockerContainer extends ContainerManager {
-    defaultCompose = DOCKER_DEFAULT_COMPOSE;
-    composeFilePath = path.join(WINBOAT_DIR, "docker-compose.yml"); // TODO: If/when we support multiple VM's we need to put this in the constructor
+    defaultCompose = structuredClone(DOCKER_DEFAULT_COMPOSE);
+    composeFilePath = path.join(WINBOAT_DIR, "docker-compose.yml");
     executableAlias = "docker";
 
     constructor() {
@@ -33,11 +34,15 @@ export class DockerContainer extends ContainerManager {
     }
 
     writeCompose(compose: ComposeConfig): void {
+        // These identities must never change when editing a profile's settings.
+        compose.name = ACTIVE_INSTALLATION.projectName;
+        compose.services.windows.container_name = ACTIVE_INSTALLATION.containerName;
+        compose.services.windows.restart = "no";
+        fs.mkdirSync(WINBOAT_DIR, { recursive: true, mode: 0o700 });
         const composeContent = YAML.stringify(compose, { nullStr: "" });
-        fs.writeFileSync(this.composeFilePath, composeContent, { encoding: "utf-8" });
+        fs.writeFileSync(this.composeFilePath, composeContent, { encoding: "utf-8", mode: 0o600 });
 
         containerLogger.info(`Wrote to compose file at: ${this.composeFilePath}`);
-        containerLogger.info(`Compose file content: ${JSON.stringify(composeContent, null, 2)}`);
     }
 
     async compose(direction: ComposeDirection, extraArgs: ComposeArguments[] = []): Promise<void> {
@@ -49,7 +54,13 @@ export class DockerContainer extends ContainerManager {
         }
 
         try {
-            const { stderr } = await execFileAsync(this.executableAlias, args);
+            const run = () => execFileAsync(this.executableAlias, args);
+            const { stderr } = direction === "up" && !extraArgs.includes("--no-start")
+                ? await withInstallationStart(ACTIVE_INSTALLATION.id, async () => {
+                    const result = await run();
+                    await refreshActiveInstallationPorts();
+                    return result;
+                }) : await run();
             if (stderr) {
                 containerLogger.error(stderr);
             }
@@ -63,7 +74,13 @@ export class DockerContainer extends ContainerManager {
     async container(action: ContainerAction): Promise<void> {
         const args = ["container", action, this.containerName];
         try {
-            const { stdout } = await execFileAsync(this.executableAlias, args);
+            const run = () => execFileAsync(this.executableAlias, args);
+            const { stdout } = ["start", "restart", "unpause"].includes(action)
+                ? await withInstallationStart(ACTIVE_INSTALLATION.id, async () => {
+                    const result = await run();
+                    await refreshActiveInstallationPorts();
+                    return result;
+                }) : await run();
             containerLogger.info(`Container action '${action}' response: '${stdout}'`);
         } catch (e) {
             containerLogger.error(`Failed to run container action '${stringifyExecFile(this.executableAlias, args)}'`);
@@ -108,7 +125,7 @@ export class DockerContainer extends ContainerManager {
         const args = ["ps", "-a", "--filter", `name=${this.containerName}`, "--format", "{{.Names}}"];
         try {
             const { stdout: exists } = await execFileAsync(this.executableAlias, args);
-            return exists.includes("WinBoat");
+            return exists.split(/\r?\n/).includes(this.containerName);
         } catch (e) {
             containerLogger.error(
                 `Failed to get container status, is ${capitalizeFirstLetter(this.executableAlias)} installed?`,
@@ -119,7 +136,7 @@ export class DockerContainer extends ContainerManager {
     }
 
     get containerName(): string {
-        return this.defaultCompose.services.windows.container_name; // TODO: investigate whether we should use the compose on disk
+        return ACTIVE_INSTALLATION.containerName;
     }
 
     static override async _getSpecs(): Promise<DockerSpecs> {

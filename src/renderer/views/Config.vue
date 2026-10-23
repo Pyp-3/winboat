@@ -60,14 +60,19 @@
                     </x-button>
                 </ConfigCard>
 
-                <!-- Auto Start Container -->
+                <!-- Automatic daemon starts would bypass the one-at-a-time guard. -->
                 <ConfigCard
                     icon="clarity:power-solid"
-                    title="Auto Start Container"
-                    desc="If enabled, the Windows container will automatically be started when the system boots up"
-                    type="switch"
-                    v-model:value="autoStartContainer"
-                />
+                    title="Manual startup"
+                    type="custom"
+                >
+                    <template v-slot:desc>
+                        Start Windows from Home. Automatic startup is disabled so installations run one at a time.
+                        <span v-if="origAutoStartContainer" class="block text-amber-300 mt-1">
+                            This imported installation still has automatic startup enabled. Save these settings to disable it.
+                        </span>
+                    </template>
+                </ConfigCard>
 
                 <div class="flex flex-col">
                     <p class="my-0 text-yellow-500" v-for="(warning, k) of warnings" :key="`warning-${k}`">
@@ -409,29 +414,6 @@
             </div>
         </div>
 
-        <div>
-            <x-label class="mb-4 text-neutral-300">Danger Zone</x-label>
-            <x-card class="flex flex-col py-3 my-0 mb-6 w-full backdrop-blur-xl backdrop-brightness-150 bg-red-500/10">
-                <h1 class="my-0 text-lg font-normal text-red-300">
-                    ⚠️ <span class="font-bold">WARNING:</span> All actions here are potentially destructive, proceed at
-                    your own caution!
-                </h1>
-            </x-card>
-            <div></div>
-            <x-button
-                class="!bg-red-800/20 px-4 py-1 !border-red-500/10 generic-hover flex flex-row items-center gap-2 !text-red-300"
-                @click="resetWinboat()"
-                :disabled="isResettingWinboat"
-            >
-                <Icon v-if="resetQuestionCounter < 3" icon="mdi:bomb" class="size-8"></Icon>
-                <x-throbber v-else class="size-8"></x-throbber>
-
-                <span v-if="resetQuestionCounter === 0">Reset Winboat & Remove VM</span>
-                <span v-else-if="resetQuestionCounter === 1">Are you sure? This action cannot be undone.</span>
-                <span v-else-if="resetQuestionCounter === 2">One final check, are you ABSOLUTELY sure?</span>
-                <span v-else-if="resetQuestionCounter === 3">Resetting Winboat...</span>
-            </x-button>
-        </div>
     </div>
 </template>
 
@@ -457,7 +439,6 @@ import {
     QMP_PORT_MAPPING,
     RECOMMENDED_VM_RAM_GB,
 } from "../lib/constants";
-const { app }: typeof import("@electron/remote") = require("@electron/remote");
 const electron: typeof import("electron") = require("electron").remote || require("@electron/remote");
 const os: typeof import("os") = require("node:os");
 
@@ -476,8 +457,6 @@ const origSharedFolderPath = ref("");
 const origAutoStartContainer = ref(false);
 const autoStartContainer = ref(false);
 const isApplyingChanges = ref(false);
-const resetQuestionCounter = ref(0);
-const isResettingWinboat = ref(false);
 const isUpdatingUSBPrerequisites = ref(false);
 
 // For USB Devices
@@ -525,8 +504,8 @@ async function assignValues() {
     // Any policy that makes the container come back on its own counts as auto start,
     // not just the one we currently write out
     const restartPolicy = compose.value.services.windows.restart;
-    autoStartContainer.value = AUTOSTART_RESTART_POLICIES.includes(restartPolicy);
-    origAutoStartContainer.value = autoStartContainer.value;
+    origAutoStartContainer.value = AUTOSTART_RESTART_POLICIES.includes(restartPolicy);
+    autoStartContainer.value = false;
 
     const specs = await getSpecs();
     maxRamGB.value = specs.ramGB;
@@ -681,16 +660,6 @@ const saveButtonDisabled = computed(() => {
 
     return shouldBeDisabled;
 });
-
-async function resetWinboat() {
-    if (++resetQuestionCounter.value < 3) {
-        return;
-    }
-
-    isResettingWinboat.value = true;
-    await winboat.resetWinboat();
-    app.exit();
-}
 
 // Reactivity utterly fails here, so we use this function to
 // refresh via the button

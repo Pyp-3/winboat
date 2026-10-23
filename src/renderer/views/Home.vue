@@ -1,5 +1,7 @@
 <template>
     <div>
+        <p class="text-neutral-400 mt-0 mb-4">Selected installation: <strong class="text-white">{{ activeInstallation.name }}</strong></p>
+        <p v-if="actionError" role="alert" class="rounded-xl border border-red-400/30 bg-red-500/10 p-4 text-red-200">{{ actionError }}</p>
         <x-card
             class="bg-neutral-800/20 backdrop-brightness-150 backdrop-blur-xl flex flex-row items-center justify-between"
         >
@@ -84,7 +86,7 @@
                         winboat.containerStatus.value === ContainerStatus.UNKNOWN ||
                         winboat.containerStatus.value === ContainerStatus.ERROR
                     "
-                    @click="winboat.startContainer()"
+                    @click="performAction(() => winboat.startContainer())"
                 >
                     <Icon class="w-20 h-20 text-green-300" icon="mingcute:play-fill"></Icon>
                 </button>
@@ -92,7 +94,7 @@
                     title="Stop"
                     class="generic-hover"
                     v-if="winboat.containerStatus.value === ContainerStatus.RUNNING"
-                    @click="winboat.stopContainer()"
+                    @click="performAction(() => winboat.stopContainer())"
                 >
                     <Icon class="w-20 h-20 text-red-300" icon="mingcute:stop-fill"></Icon>
                 </button>
@@ -100,7 +102,7 @@
                     title="Restart"
                     class="generic-hover"
                     v-if="winboat.containerStatus.value === ContainerStatus.RUNNING"
-                    @click="winboat.restartContainer()"
+                    @click="performAction(() => winboat.restartContainer())"
                 >
                     <Icon class="w-20 h-20 text-orange-300" icon="mingcute:refresh-3-line"></Icon>
                 </button>
@@ -112,11 +114,11 @@
                         winboat.containerStatus.value === ContainerStatus.RUNNING ||
                         winboat.containerStatus.value === ContainerStatus.PAUSED
                     "
-                    @click="
+                    @click="performAction(() =>
                         winboat.containerStatus.value === ContainerStatus.PAUSED
                             ? winboat.unpauseContainer()
                             : winboat.pauseContainer()
-                    "
+                    )"
                 >
                     <Icon class="w-20 h-20 text-yellow-100" icon="mingcute:pause-line"></Icon>
                 </button>
@@ -211,10 +213,22 @@ import { WINDOWS_VERSIONS } from "../lib/constants";
 import { Icon } from "@iconify/vue";
 import { capitalizeFirstLetter } from "../utils/capitalize";
 import { openAnchorLink, openContainerLogFile } from "../utils/openLink";
+import { getActiveInstallation } from "../lib/installations";
 
 const winboat = Winboat.getInstance();
 const compose = ref<ComposeConfig | null>(null);
 const wallpaper = ref("");
+const activeInstallation = getActiveInstallation();
+const actionError = ref("");
+
+async function performAction(action: () => Promise<void>) {
+    actionError.value = "";
+    try {
+        await action();
+    } catch (error) {
+        actionError.value = error instanceof Error ? error.message : String(error);
+    }
+}
 
 onMounted(async () => {
     compose.value = Winboat.readCompose(winboat.containerMgr!.composeFilePath);

@@ -4,9 +4,11 @@ import { createLogger } from "../utils/log";
 import { guestServerOemDir } from "../utils/guestServer";
 import { createNanoEvents, type Emitter } from "nanoevents";
 import { Winboat } from "./winboat";
-import { ContainerManager } from "./containers/container";
+import { ContainerStatus, ContainerManager } from "./containers/container";
 import { WinboatConfig } from "./config";
 import { createContainer } from "./containers/common";
+import { getActiveInstallation, getInstallationStore } from "./installations";
+import { beginPendingInstallation, readPendingInstallation, markPendingOemReady, completePendingInstallation, pendingInstallConfiguration, planPendingResume, PENDING_INSTALLATION_FILE } from "./pending-installation";
 
 const fs: typeof import("fs") = require("fs");
 const path: typeof import("path") = require("path");
@@ -37,6 +39,14 @@ export class InstallManager {
     state: InstallStates;
     preinstallMsg: string;
     container: ContainerManager;
+    private resumeMode = false;
+
+    static resume(): InstallManager {
+        const marker = readPendingInstallation(getActiveInstallation(), getInstallationStore().root);
+        const manager = new InstallManager(pendingInstallConfiguration(marker));
+        manager.resumeMode = true;
+        return manager;
+    }
 
     constructor(conf: InstallConfiguration) {
         this.conf = conf;
@@ -65,6 +75,10 @@ export class InstallManager {
 
     async createComposeFile() {
         this.changeState(InstallStates.CREATING_COMPOSE_FILE);
+        if (fs.existsSync(this.container.composeFilePath)) {
+            throw new Error("This installation already has a compose file. Open it from Installations instead of overwriting it.");
+        }
+        this.conf.installFolder = getInstallationStore().validateStoragePath(this.conf.installFolder);
 
         // Ensure the .winboat directory exists
         if (!fs.existsSync(WINBOAT_DIR)) {
@@ -79,7 +93,7 @@ export class InstallManager {
         }
 
         // Configure the compose file
-        const composeContent = this.container.defaultCompose;
+        const composeContent = structuredClone(this.container.defaultCompose);
 
         composeContent.services.windows.environment.RAM_SIZE = `${this.conf.ramGB}G`;
         composeContent.services.windows.environment.CPU_CORES = `${this.conf.cpuCores}`;
@@ -126,7 +140,9 @@ export class InstallManager {
             }
         }
 
-        // Write the compose file
+        // Save only this new installation's setup before writing compose. The
+        // private marker permits recovery after a disk-write, OEM or pull failure.
+        beginPendingInstallation(getActiveInstallation(), getInstallationStore().root, this.conf.container, composeContent);
         this.container.writeCompose(composeContent);
     }
 
@@ -194,9 +210,10 @@ export class InstallManager {
 
         // Generate the guest authentication token, will be placed in OEM
         try {
-            const token = crypto.randomUUID();
-            fs.writeFileSync(GUEST_TOKEN_PATH, token, { encoding: "utf8" });
-            fs.writeFileSync(path.join(oemPath, "guest_token"), token, { encoding: "utf8" });
+            const token = fs.existsSync(GUEST_TOKEN_PATH) ? fs.readFileSync(GUEST_TOKEN_PATH, "utf8").trim() : crypto.randomUUID();
+            if (!token) throw new Error("The saved guest token is empty. Restore it before resuming setup.");
+            fs.writeFileSync(GUEST_TOKEN_PATH, token, { encoding: "utf8", mode: 0o600 });
+            fs.writeFileSync(path.join(oemPath, "guest_token"), token, { encoding: "utf8", mode: 0o600 });
         } catch (error) {
             logger.error(`Failed to create guest token: ${error}`);
             throw error;
@@ -207,8 +224,13 @@ export class InstallManager {
         this.changeState(InstallStates.STARTING_CONTAINER);
         logger.info("Starting container...");
 
-        // Start the container
-        await this.container.compose("up");
+        // Resume an already-created container without changing its storage or
+        // rewriting its compose configuration.
+        if (await this.container.exists()) {
+            await this.container.container(await this.container.getStatus() === ContainerStatus.PAUSED ? "unpause" : "start");
+        } else {
+            await this.container.compose("up");
+        }
 
         logger.info("Container started successfully.");
     }
@@ -265,6 +287,7 @@ export class InstallManager {
                 if (res.status === 200) {
                     logger.info("WinBoat Guest Server is up and healthy!");
                     this.changeState(InstallStates.COMPLETED);
+                    completePendingInstallation(getActiveInstallation());
 
                     const compose = Winboat.readCompose(this.container.composeFilePath);
                     const filteredVolumes = compose.services.windows.volumes.filter(
@@ -295,17 +318,51 @@ export class InstallManager {
         }
     }
 
+    private async prepareResume() {
+        this.changeState(InstallStates.CREATING_COMPOSE_FILE);
+        const active = getActiveInstallation();
+        const marker = readPendingInstallation(active, getInstallationStore().root);
+        const hasDisk = fs.existsSync(this.conf.installFolder) && fs.readdirSync(this.conf.installFolder).some(entry => /^data\d*\.(img|qcow2)$/i.test(entry));
+        const oemPath = path.join(WINBOAT_DIR, "oem");
+        const assetsPresent = ["install.bat", "server/winboat_guest_server.exe", "updater/winboat_guest_server_updater.exe", "guest_token"].every(file => fs.existsSync(path.join(oemPath, file))) && fs.existsSync(GUEST_TOKEN_PATH);
+        const plan = planPendingResume(marker, {
+            composeExists: fs.existsSync(this.container.composeFilePath),
+            diskExists: hasDisk,
+            containerStatus: await getInstallationStore().getStatus(active.id),
+            oemAssetsPresent: assetsPresent,
+        });
+        if (plan.restoreCompose) {
+            getInstallationStore().validateStoragePath(this.conf.installFolder);
+            this.container.writeCompose(marker.compose);
+        }
+        if (plan.restoreOem) {
+            await this.createOEMAssets();
+            markPendingOemReady(active, getInstallationStore().root);
+        } else {
+            const token = fs.readFileSync(GUEST_TOKEN_PATH, "utf8").trim();
+            if (!token || token !== fs.readFileSync(path.join(oemPath, "guest_token"), "utf8").trim()) {
+                throw new Error("The saved guest authentication tokens do not match. Restore the original tokens before resuming.");
+            }
+        }
+    }
+
     async install() {
         logger.info("Starting installation...");
 
         try {
-            await this.createComposeFile();
-            await this.createOEMAssets();
+            if (this.resumeMode) {
+                await this.prepareResume();
+            } else {
+                await this.createComposeFile();
+                await this.createOEMAssets();
+                markPendingOemReady(getActiveInstallation(), getInstallationStore().root);
+            }
             await this.startContainer();
             await this.monitorContainerPreinstall();
             await this.monitorAPIHealth();
         } catch (e) {
             this.changeState(InstallStates.INSTALL_ERROR);
+            this.emitter.emit("error", e instanceof Error ? e : new Error(String(e)));
             logger.error("Errors encountered, could not complete the installation steps.");
             logger.error(e);
             return;
@@ -357,7 +414,12 @@ function hasWindowsDiskImage(storageFolder: string): boolean {
     }
 }
 
+export function hasPendingInstallation(directory = WINBOAT_DIR): boolean {
+    return fs.existsSync(path.join(directory, PENDING_INSTALLATION_FILE));
+}
+
 export async function isInstalled(): Promise<boolean> {
+    if (hasPendingInstallation()) return false;
     // Check if a winboat container exists
     const config = WinboatConfig.readConfigObject(false);
 

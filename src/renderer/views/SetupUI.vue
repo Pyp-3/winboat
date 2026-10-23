@@ -1,6 +1,29 @@
 <template>
     <div class="relative size-full p-16 overflow-hidden">
-        <div class="size-full rounded-3xl bg-[#1F1F1F] shadow-lg shadow-black/50 gap-4 p-5 grid grid-cols-2">
+        <div class="absolute top-5 left-16 right-16 flex items-center justify-between gap-4">
+            <span class="text-sm text-neutral-400">Setting up <strong class="text-white">{{ activeInstallation.name }}</strong></span>
+            <button
+                v-if="canLeaveSetup"
+                class="text-sm text-violet-300 hover:text-violet-200 underline"
+                @click="$router.push('/installations')"
+            >Back to installations</button>
+            <span v-else class="text-sm text-neutral-400">Installation in progress</span>
+        </div>
+        <div v-if="resumePending && !resumeStarted" class="size-full rounded-3xl bg-[#1F1F1F] shadow-lg shadow-black/50 p-10 flex flex-col justify-center items-start gap-5">
+            <Icon icon="fluent:arrow-clockwise-24-filled" class="size-16 text-violet-400" />
+            <h1 class="text-3xl font-semibold my-0">Resume Windows setup</h1>
+            <p class="text-neutral-300 max-w-2xl my-0">
+                Setup for {{ activeInstallation.name }} has not finished. Continue with its saved Windows settings,
+                credentials, and disk files.
+            </p>
+            <div class="max-w-full">
+                <p class="text-sm text-neutral-500 mb-1">Windows storage</p>
+                <p class="font-mono text-sm break-all text-neutral-300 mt-0">{{ activeInstallation.storagePath }}</p>
+            </div>
+            <p v-if="installationError" class="text-red-200" role="alert">{{ installationError }}</p>
+            <x-button toggled @click="resumeSetup">Resume Windows setup</x-button>
+        </div>
+        <div v-else class="size-full rounded-3xl bg-[#1F1F1F] shadow-lg shadow-black/50 gap-4 p-5 grid grid-cols-2">
             <div>
                 <div id="stepStatus" class="flex flex-row justify-center gap-4 pt-2">
                     <div
@@ -790,19 +813,19 @@
                             class="flex flex-col h-full items-center justify-center gap-4"
                         >
                             <Icon icon="line-md:alert" class="size-16 text-red-500"></Icon>
+                            <p v-if="installationError" class="text-red-200 text-center" role="alert">{{ installationError }}</p>
                             <x-label class="text-lg text-gray-400 text-center">
                                 An error occurred while installing Windows. Please check the logs in
-                                <span class="font-mono bg-neutral-700 rounded-md px-0.5">~/.winboat</span>
+                                <span class="font-mono bg-neutral-700 rounded-md px-0.5 break-all">{{ activeInstallation.directory }}</span>
                                 and verify
                                 <span class="font-mono bg-neutral-700 rounded-md px-0.5"
-                                    >{{ installManager!.container.executableAlias }} logs WinBoat</span
+                                    >{{ installManager!.container.executableAlias }} logs {{ activeInstallation.containerName }}</span
                                 >
                                 in your terminal for more information.
                             </x-label>
                             <x-label class="text-lg text-gray-400 text-center">
-                                To reset and try again, follow
-                                <a href="https://rentry.org/winboat_retry_install" @click="openAnchorLink">these</a>
-                                instructions.
+                                Your other installations are unchanged. Return to installations to inspect this environment
+                                before retrying. Keep any existing disk files.
                             </x-label>
                         </div>
 
@@ -815,7 +838,7 @@
                             <x-label class="text-lg text-gray-400 text-center">
                                 Windows has been installed successfully!
                             </x-label>
-                            <x-button @click="$router.push('/home')">Finish</x-button>
+                            <x-button @click="finishSetup">Finish</x-button>
                         </div>
                     </div>
                 </div>
@@ -841,12 +864,14 @@ import {
     WINDOWS_LANGUAGES,
     type WindowsVersionKey,
 } from "../lib/constants";
-import { InstallManager, InstallStates } from "../lib/install";
+import { InstallManager, InstallStates, hasPendingInstallation } from "../lib/install";
 import { openAnchorLink } from "../utils/openLink";
 import { setIntervalImmediately } from "../utils/interval";
 import license from "../assets/LICENSE.txt?raw";
 import { ContainerRuntimes, getContainerSpecs, type ContainerSpecs } from "../lib/containers/common";
 import { WinboatConfig } from "../lib/config";
+import { getActiveInstallation, getDefaultStoragePath } from "../lib/installations";
+import { openInstallationWindow } from "../utils/installationNavigation";
 
 const path: typeof import("path") = require("node:path");
 const electron: typeof import("electron") = require("electron").remote || require("@electron/remote");
@@ -939,7 +964,10 @@ const $router = useRouter();
 const specs = ref<Specs>({ ...defaultSpecs });
 const currentStepIdx = ref(0);
 const currentStep = computed(() => steps[currentStepIdx.value]);
-const installFolder = ref(path.join(os.homedir(), "winboat"));
+const activeInstallation = getActiveInstallation();
+const resumePending = hasPendingInstallation();
+const resumeStarted = ref(false);
+const installFolder = ref(getDefaultStoragePath());
 const windowsVersion = ref<WindowsVersionKey>("11");
 const windowsLanguage = ref("English");
 const customIsoPath = ref("");
@@ -955,6 +983,8 @@ const confirmPassword = ref("");
 const folderSharing = ref(false);
 const sharedFolderPath = ref("");
 const installState = ref<InstallStates>(InstallStates.IDLE);
+const installationError = ref("");
+const canLeaveSetup = computed(() => [InstallStates.IDLE, InstallStates.INSTALL_ERROR, InstallStates.COMPLETED].includes(installState.value));
 const preinstallMsg = ref("");
 const containerRuntime = ref(ContainerRuntimes.DOCKER);
 const containerSpecs = ref<ContainerSpecs>();
@@ -1137,7 +1167,7 @@ function selectInstallFolder() {
         .then(result => {
             if (!result.canceled && result.filePaths.length > 0) {
                 const selectedPath = result.filePaths[0];
-                const finalPath = path.join(selectedPath, "winboat");
+                const finalPath = path.join(selectedPath, `winboat-${activeInstallation.id}`);
                 console.log("Install path selected:", finalPath);
                 installFolder.value = finalPath;
             }
@@ -1152,7 +1182,7 @@ const installFolderErrors = computedAsync(async () => {
         return errors; // <- The rest shouldn't be ran if no path is selected
     }
 
-    // Path without /winboat
+    // The parent exists even before the profile's storage directory is created.
     const parentPath = path.dirname(installFolder.value);
     console.log("Parent path", parentPath);
 
@@ -1164,8 +1194,19 @@ const installFolderErrors = computedAsync(async () => {
         errors.push("The selected install location is not writable");
     }
 
+    if (fs.existsSync(installFolder.value)) {
+        try {
+            if (fs.readdirSync(installFolder.value).length > 0) {
+                errors.push("This folder already contains files. Choose an empty folder for a new Windows installation.");
+            }
+        } catch {
+            errors.push("The selected location must be a readable directory.");
+        }
+    }
+
     // Check if we have enough disk space
-    const diskSpace = await checkDiskSpace(parentPath);
+    const diskSpace = await checkDiskSpace(parentPath).catch(() => null);
+    if (!diskSpace) return [...errors, "Could not check free space for the selected location."];
     const freeGB = Math.floor(diskSpace.free / (1024 * 1024 * 1024));
     if (freeGB < MIN_DISK_GB) {
         errors.push(
@@ -1180,7 +1221,8 @@ const installFolderDiskSpaceGB = computedAsync(async () => {
     if (!installFolder.value) return 0;
 
     const parentPath = path.dirname(installFolder.value);
-    const diskSpace = await checkDiskSpace(parentPath);
+    const diskSpace = await checkDiskSpace(parentPath).catch(() => null);
+    if (!diskSpace) return 0;
     const freeGB = Math.floor(diskSpace.free / (1024 * 1024 * 1024));
     return freeGB;
 });
@@ -1200,6 +1242,7 @@ function selectSharedFolder() {
 }
 
 function install() {
+    installationError.value = "";
     const installConfig: InstallConfiguration = {
         windowsVersion: windowsVersion.value,
         windowsLanguage: windowsLanguage.value,
@@ -1218,19 +1261,42 @@ function install() {
     wbConfig.config.containerRuntime = containerRuntime.value; // Save which runtime to use.
 
     installManager = new InstallManager(installConfig);
+    observeInstallation(installManager);
+}
 
+function resumeSetup() {
+    installationError.value = "";
+    try {
+        installManager = InstallManager.resume();
+        currentStepIdx.value = steps.findIndex(step => step.id === StepID.INSTALL);
+        resumeStarted.value = true;
+        observeInstallation(installManager);
+    } catch (error) {
+        installationError.value = error instanceof Error ? error.message : String(error);
+    }
+}
+
+function observeInstallation(manager: InstallManager) {
     // Begin installation and attach event listeners
-    installManager.emitter.on("stateChanged", newState => {
+    manager.emitter.on("stateChanged", newState => {
         installState.value = newState;
         console.log("Install state changed", newState);
     });
 
-    installManager.emitter.on("preinstallMsg", msg => {
+    manager.emitter.on("preinstallMsg", msg => {
         preinstallMsg.value = msg;
         console.log("Preinstall msg", msg);
     });
 
-    installManager.install();
+    manager.emitter.on("error", error => {
+        installationError.value = error.message;
+    });
+
+    void manager.install();
+}
+
+function finishSetup() {
+    openInstallationWindow("/home");
 }
 </script>
 

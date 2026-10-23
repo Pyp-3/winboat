@@ -1,6 +1,7 @@
 import { ComposeConfig } from "../../../types";
 import { PODMAN_DEFAULT_COMPOSE } from "../../data/podman";
-import { WINBOAT_DIR } from "../constants";
+import { ACTIVE_INSTALLATION, WINBOAT_DIR, refreshActiveInstallationPorts } from "../constants";
+import { withInstallationStart } from "../installations";
 import {
     ComposeArguments,
     ComposeDirection,
@@ -46,7 +47,7 @@ type PodmanInfo = {
 const COMPOSE_ENV_VARS = { PODMAN_COMPOSE_PROVIDER: "podman-compose", PODMAN_COMPOSE_WARNING_LOGS: "false" };
 
 export class PodmanContainer extends ContainerManager {
-    defaultCompose = PODMAN_DEFAULT_COMPOSE;
+    defaultCompose = structuredClone(PODMAN_DEFAULT_COMPOSE);
     composeFilePath = path.join(WINBOAT_DIR, "podman-compose.yml");
     executableAlias = "podman";
 
@@ -55,15 +56,19 @@ export class PodmanContainer extends ContainerManager {
     }
 
     writeCompose(compose: ComposeConfig): void {
+        // These identities must never change when editing a profile's settings.
+        compose.name = ACTIVE_INSTALLATION.projectName;
+        compose.services.windows.container_name = ACTIVE_INSTALLATION.containerName;
+        compose.services.windows.restart = "no";
+        fs.mkdirSync(WINBOAT_DIR, { recursive: true, mode: 0o700 });
         const composeContent = YAML.stringify(compose, {
             nullStr: "",
             defaultStringType: "QUOTE_DOUBLE",
             defaultKeyType: "PLAIN",
         });
-        fs.writeFileSync(this.composeFilePath, composeContent, { encoding: "utf-8" });
+        fs.writeFileSync(this.composeFilePath, composeContent, { encoding: "utf-8", mode: 0o600 });
 
         containerLogger.info(`Wrote to compose file at: ${this.composeFilePath}`);
-        containerLogger.info(`Compose file content: ${JSON.stringify(composeContent, null, 2)}`);
     }
 
     async compose(direction: ComposeDirection, extraArgs: ComposeArguments[] = []): Promise<void> {
@@ -75,9 +80,15 @@ export class PodmanContainer extends ContainerManager {
         }
 
         try {
-            const { stderr } = await execFileAsync(this.executableAlias, args, {
+            const run = () => execFileAsync(this.executableAlias, args, {
                 env: concatEnv(process.env as { [key: string]: string }, COMPOSE_ENV_VARS),
             });
+            const { stderr } = direction === "up" && !extraArgs.includes("--no-start")
+                ? await withInstallationStart(ACTIVE_INSTALLATION.id, async () => {
+                    const result = await run();
+                    await refreshActiveInstallationPorts();
+                    return result;
+                }) : await run();
             if (stderr) {
                 containerLogger.error(stderr);
             }
@@ -91,7 +102,13 @@ export class PodmanContainer extends ContainerManager {
     async container(action: ContainerAction): Promise<void> {
         const args = ["container", action, this.containerName];
         try {
-            const { stdout } = await execFileAsync(this.executableAlias, args);
+            const run = () => execFileAsync(this.executableAlias, args);
+            const { stdout } = ["start", "restart", "unpause"].includes(action)
+                ? await withInstallationStart(ACTIVE_INSTALLATION.id, async () => {
+                    const result = await run();
+                    await refreshActiveInstallationPorts();
+                    return result;
+                }) : await run();
             containerLogger.info(`Container action '${action}' response: '${stdout}'`);
         } catch (e) {
             containerLogger.error(`Failed to run container action '${stringifyExecFile(this.executableAlias, args)}'`);
@@ -140,7 +157,7 @@ export class PodmanContainer extends ContainerManager {
         const args = ["ps", "-a", "--filter", `name=${this.containerName}`, "--format", "{{.Names}}"];
         try {
             const { stdout: exists } = await execFileAsync(this.executableAlias, args);
-            return exists.includes(this.containerName);
+            return exists.split(/\r?\n/).includes(this.containerName);
         } catch (e) {
             containerLogger.error(
                 `Failed to get container status, is ${capitalizeFirstLetter(this.executableAlias)} installed?`,
@@ -151,7 +168,7 @@ export class PodmanContainer extends ContainerManager {
     }
 
     get containerName(): string {
-        return this.defaultCompose.services.windows.container_name; // TODO: investigate whether we should use the compose on disk
+        return ACTIVE_INSTALLATION.containerName;
     }
 
     static override async _getSpecs(): Promise<PodmanSpecs> {

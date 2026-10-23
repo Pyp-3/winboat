@@ -1,5 +1,6 @@
 import { ComposeConfig } from "../../types";
 import {
+    ACTIVE_INSTALLATION,
     COMPOSE_PORT_MAPPINGS,
     GUEST_API_PORT,
     GUEST_QMP_PORT,
@@ -9,14 +10,14 @@ import {
 } from "../lib/constants";
 
 export const PODMAN_DEFAULT_COMPOSE: ComposeConfig = {
-    name: "winboat",
+    name: ACTIVE_INSTALLATION.projectName,
     volumes: {
         data: null,
     },
     services: {
         windows: {
             image: "ghcr.io/dockur/windows:6.03",
-            container_name: "WinBoat",
+            container_name: ACTIVE_INSTALLATION.containerName,
             environment: {
                 VERSION: "11",
                 RAM_SIZE: "4G",

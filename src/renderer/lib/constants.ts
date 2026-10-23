@@ -1,11 +1,10 @@
+import { getActiveInstallation, getPublishedInstallationPorts } from "./installations";
 const os: typeof import("os") = require("node:os");
-const process: typeof import("process") = require("node:process");
 const path: typeof import("path") = require("node:path");
 
-// Should be {XDG_DATA_HOME}/winboat-app or {home}/.local/share/winboat-app if missing
-export const WINBOAT_DIR = process.env.XDG_DATA_HOME ?
-    path.join(process.env.XDG_DATA_HOME, "winboat-app") :
-    path.join(os.homedir(), ".local", "share", "winboat-app");
+// One profile is fixed for the renderer lifetime; switching reloads the renderer.
+export const ACTIVE_INSTALLATION = getActiveInstallation();
+export const WINBOAT_DIR = ACTIVE_INSTALLATION.directory;
 export const DEFAULT_HOMEBREW_DIR = path.join(os.homedir(), "../linuxbrew/.linuxbrew/bin");
 
 export const CONTAINER_LOG_FILE = path.join(WINBOAT_DIR, "container.log");
@@ -68,23 +67,37 @@ export const WINDOWS_LANGUAGES = {
 };
 
 // Ports
-// WinBoat claims host ports 47270-47279 on 127.0.0.1 for its services.
-// The range is unassigned by IANA; 47275-47279 are reserved for future services.
+// Each new installation receives a separate loopback port block. Existing
+// installations retain their published ports (including legacy port ranges).
 export const GUEST_NOVNC_PORT = 8006;
 export const GUEST_API_PORT = 7148;
 export const GUEST_QMP_PORT = 7149;
 export const GUEST_UPDATE_PORT = 7150;
 export const GUEST_RDP_PORT = 3389;
 
-export const HOST_NOVNC_PORT = 47270;
-export const HOST_API_PORT = 47271;
-export const HOST_QMP_PORT = 47272;
-export const HOST_RDP_PORT = 47273;
-export const HOST_UPDATE_PORT = 47274;
+export let HOST_NOVNC_PORT = ACTIVE_INSTALLATION.ports.novnc;
+export let HOST_API_PORT = ACTIVE_INSTALLATION.ports.api;
+export let HOST_QMP_PORT = ACTIVE_INSTALLATION.ports.qmp;
+export let HOST_RDP_PORT = ACTIVE_INSTALLATION.ports.rdp;
+export let HOST_UPDATE_PORT = ACTIVE_INSTALLATION.ports.update;
 
-export const NOVNC_URL = `http://127.0.0.1:${HOST_NOVNC_PORT}`;
-export const WINBOAT_API_URL = `http://127.0.0.1:${HOST_API_PORT}`;
-export const WINBOAT_UPDATE_URL = `http://127.0.0.1:${HOST_UPDATE_PORT}`;
+export let NOVNC_URL = `http://127.0.0.1:${HOST_NOVNC_PORT}`;
+export let WINBOAT_API_URL = `http://127.0.0.1:${HOST_API_PORT}`;
+export let WINBOAT_UPDATE_URL = `http://127.0.0.1:${HOST_UPDATE_PORT}`;
+
+// Legacy WinBoat assigned a range of possible host ports. Read the actual
+// bindings after every boot; never rewrite or recreate its Windows container.
+export async function refreshActiveInstallationPorts(): Promise<void> {
+    const ports = await getPublishedInstallationPorts(getActiveInstallation());
+    HOST_NOVNC_PORT = ports.novnc;
+    HOST_API_PORT = ports.api;
+    HOST_QMP_PORT = ports.qmp;
+    HOST_RDP_PORT = ports.rdp;
+    HOST_UPDATE_PORT = ports.update;
+    NOVNC_URL = `http://127.0.0.1:${HOST_NOVNC_PORT}`;
+    WINBOAT_API_URL = `http://127.0.0.1:${HOST_API_PORT}`;
+    WINBOAT_UPDATE_URL = `http://127.0.0.1:${HOST_UPDATE_PORT}`;
+}
 
 export const QMP_ARGUMENT = `-qmp tcp:0.0.0.0:${GUEST_QMP_PORT},server,wait=off`;
 export const QMP_PORT_MAPPING = `127.0.0.1:${HOST_QMP_PORT}:${GUEST_QMP_PORT}`;

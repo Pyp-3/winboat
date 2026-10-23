@@ -13,6 +13,12 @@
   </table>
 </div>
 
+## Multiple Windows installations
+
+This fork adds an **Installations** library for creating, naming, and switching between separate Windows environments. It runs one installation at a time and adopts an existing WinBoat installation without reinstalling Windows. Existing disks cannot be deleted through the library.
+
+See [building, global installation, CI artifacts, rollback, and upstream sync](docs/custom-build.md) for this fork's `make build`, `sudo make install`, and `make sync` workflow.
+
 ## Screenshots
 
 <div align="center">

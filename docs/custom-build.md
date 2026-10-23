@@ -2,6 +2,12 @@
 
 This fork adds a library of isolated Windows installations. The default policy allows one installation to run at a time. Each installation has its own storage, settings, container identity and ports. Existing Windows storage is adopted without formatting or reinstalling it.
 
+## Interrupted Windows setup
+
+An unfinished installation created by this manager offers **Resume Windows setup**. Recovery uses its saved settings and credentials; it refuses changed compose files, another profile’s recovery marker, or an unavailable container runtime. The private `.pending-installation.json` file has mode `0600` and is removed after the guest reports healthy. Do not commit or share it.
+
+Missing setup assets can be recreated only before a Windows disk or container exists. Once either exists, missing assets or mismatched guest tokens require restoring the originals. Recovery preserves existing disk files and does not regenerate credentials for an installation that has started. Imported Windows installations are never enrolled in this recovery process.
+
 ## Workspace
 
 The local workspace is `/opt/winboat-workspace`: `source/` holds this checkout and its branches; `worktrees/` holds temporary upstream validation checkouts; `releases/` holds installed binaries; `current` and `previous` select releases. `build-backups/` preserves older uninstalled builds. Windows data is independent of the application releases. Never delete the workspace to uninstall the app.
