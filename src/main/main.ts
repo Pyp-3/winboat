@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, session, dialog } from "electron";
+import { app, BrowserWindow, ipcMain, session, dialog, screen } from "electron";
 import { join } from "path";
 import { initialize, enable } from "@electron/remote/main/index.js";
 import Store from "electron-store";
@@ -6,8 +6,10 @@ import Store from "electron-store";
 initialize();
 
 // Window Constants
-const WINDOW_MIN_WIDTH = 1280;
-const WINDOW_MIN_HEIGHT = 800;
+const WINDOW_MIN_WIDTH = 900;
+const WINDOW_MIN_HEIGHT = 600;
+const WINDOW_DEFAULT_WIDTH = 1280;
+const WINDOW_DEFAULT_HEIGHT = 800;
 
 // For electron-store Type-Safety
 type SchemaType = {
@@ -28,11 +30,11 @@ const windowStore = new Store<SchemaType>({
             properties: {
                 width: {
                     type: "number",
-                    default: WINDOW_MIN_WIDTH,
+                    default: WINDOW_DEFAULT_WIDTH,
                 },
                 height: {
                     type: "number",
-                    default: WINDOW_MIN_HEIGHT,
+                    default: WINDOW_DEFAULT_HEIGHT,
                 },
             },
             required: ["width", "height"],
@@ -61,13 +63,30 @@ if (!primaryInstance) app.quit();
 
 async function createWindow(startupRoute: StartupRoute = "/installations", previousWindow: BrowserWindow | null = null) {
     const previousBounds = previousWindow?.getBounds();
+    const preferredWidth = previousBounds?.width ?? windowStore.get("dimensions.width");
+    const preferredHeight = previousBounds?.height ?? windowStore.get("dimensions.height");
+    const savedX = previousBounds?.x ?? windowStore.get("position.x");
+    const savedY = previousBounds?.y ?? windowStore.get("position.y");
+    const hasPosition = Number.isFinite(savedX) && Number.isFinite(savedY);
+    const display = hasPosition
+        ? screen.getDisplayMatching({ x: savedX, y: savedY, width: preferredWidth, height: preferredHeight })
+        : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    const area = display.workArea;
+    // Saved dimensions and minimum sizes must both fit the usable display area.
+    // In particular, an 800px minimum can put setup controls below a laptop screen.
+    const minWidth = Math.min(WINDOW_MIN_WIDTH, area.width);
+    const minHeight = Math.min(WINDOW_MIN_HEIGHT, area.height);
+    const width = Math.min(Math.max(preferredWidth, minWidth), area.width);
+    const height = Math.min(Math.max(preferredHeight, minHeight), area.height);
+    const x = Math.max(area.x, Math.min(hasPosition ? savedX : area.x + Math.floor((area.width - width) / 2), area.x + area.width - width));
+    const y = Math.max(area.y, Math.min(hasPosition ? savedY : area.y + Math.floor((area.height - height) / 2), area.y + area.height - height));
     const win = new BrowserWindow({
-        minWidth: WINDOW_MIN_WIDTH,
-        minHeight: WINDOW_MIN_HEIGHT,
-        width: previousBounds?.width ?? windowStore.get("dimensions.width"),
-        height: previousBounds?.height ?? windowStore.get("dimensions.height"),
-        x: previousBounds?.x ?? windowStore.get("position.x"),
-        y: previousBounds?.y ?? windowStore.get("position.y"),
+        minWidth,
+        minHeight,
+        width,
+        height,
+        x,
+        y,
         show: false,
         transparent: false,
         frame: false,

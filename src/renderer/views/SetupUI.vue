@@ -1,15 +1,15 @@
 <template>
-    <div class="relative size-full p-16 overflow-hidden">
-        <div class="absolute top-5 left-16 right-16 flex items-center justify-between gap-4">
-            <span class="text-sm text-neutral-400">Setting up <strong class="text-white">{{ activeInstallation.name }}</strong></span>
+    <div class="setup-layout">
+        <div class="setup-heading flex items-center justify-between gap-4">
+            <span class="min-w-0 break-words text-sm text-neutral-400">Setting up <strong class="text-white">{{ activeInstallation.name }}</strong></span>
             <button
                 v-if="canLeaveSetup"
-                class="text-sm text-violet-300 hover:text-violet-200 underline"
+                class="shrink-0 text-sm text-violet-300 hover:text-violet-200 underline"
                 @click="$router.push('/installations')"
             >Back to installations</button>
             <span v-else class="text-sm text-neutral-400">Installation in progress</span>
         </div>
-        <div v-if="resumePending && !resumeStarted" class="size-full rounded-3xl bg-[#1F1F1F] shadow-lg shadow-black/50 p-10 flex flex-col justify-center items-start gap-5">
+        <div v-if="resumePending && !resumeStarted" class="setup-panel setup-resume rounded-3xl bg-[#1F1F1F] shadow-lg shadow-black/50 p-6 flex flex-col items-start gap-5">
             <Icon icon="fluent:arrow-clockwise-24-filled" class="size-16 text-violet-400" />
             <h1 class="text-3xl font-semibold my-0">Resume Windows setup</h1>
             <p class="text-neutral-300 max-w-2xl my-0">
@@ -23,8 +23,8 @@
             <p v-if="installationError" class="text-red-200" role="alert">{{ installationError }}</p>
             <x-button toggled @click="resumeSetup">Resume Windows setup</x-button>
         </div>
-        <div v-else class="size-full rounded-3xl bg-[#1F1F1F] shadow-lg shadow-black/50 gap-4 p-5 grid grid-cols-2">
-            <div>
+        <div v-else class="setup-panel setup-wizard rounded-3xl bg-[#1F1F1F] shadow-lg shadow-black/50 gap-4 p-5 grid grid-cols-2">
+            <div class="setup-artwork min-h-0 min-w-0 flex flex-col overflow-hidden">
                 <div id="stepStatus" class="flex flex-row justify-center gap-4 pt-2">
                     <div
                         v-for="(_, idx) of steps"
@@ -38,7 +38,7 @@
                     ></div>
                 </div>
                 <Transition name="bounce" mode="out-in">
-                    <div :key="currentStepIdx" id="stepIcon" class="flex items-center justify-center relative h-full">
+                    <div :key="currentStepIdx" id="stepIcon" class="flex flex-1 min-h-0 items-center justify-center relative">
                         <Icon key="icon1" class="size-[60%] text-violet-400 z-30 relative" :icon="currentStep.icon" />
                         <Icon
                             key="icon-gradient"
@@ -60,7 +60,7 @@
             </div>
 
             <Transition name="bouncedown" mode="out-in">
-                <div :key="currentStepIdx" id="stepContent" class="overflow-scroll">
+                <div :key="currentStepIdx" id="stepContent" class="min-h-0 min-w-0 overflow-y-auto overflow-x-hidden">
                     <!-- Welcome -->
                     <div v-if="currentStep.id === StepID.WELCOME" class="step-block">
                         <h1 class="text-3xl font-semibold">{{ currentStep.title }}</h1>
@@ -77,15 +77,13 @@
                     </div>
 
                     <!-- License -->
-                    <div v-if="currentStep.id === StepID.LICENSE" class="step-block">
+                    <div v-if="currentStep.id === StepID.LICENSE" class="step-block license-step">
                         <h1 class="text-3xl font-semibold">{{ currentStep.title }}</h1>
                         <p class="text-lg text-gray-400">
                             WinBoat is open-source software licensed under the MIT License. Please review the license
                             agreement below.
                         </p>
-                        <pre class="text-sm text-gray-400 bg-neutral-800 p-4 rounded-lg overflow-auto">
-                            {{ license }}
-                        </pre>
+                        <pre class="license-text text-sm text-gray-400 bg-neutral-800 p-4 rounded-lg" tabindex="0" aria-label="WinBoat license text">{{ license }}</pre>
                         <div class="flex flex-row gap-4">
                             <x-button class="px-6" @click="currentStepIdx--">Back</x-button>
                             <x-button toggled class="px-6" @click="currentStepIdx++">I Agree</x-button>
@@ -1319,8 +1317,62 @@ function finishSetup() {
     filter: blur(50px);
 }
 
+.setup-layout {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    gap: 1rem;
+    padding: clamp(1rem, 4vh, 3rem) clamp(1rem, 4vw, 4rem);
+    overflow: hidden;
+}
+
+.setup-heading { flex-shrink: 0; }
+
+.setup-panel {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+}
+
+.setup-wizard { grid-template-rows: minmax(0, 1fr); }
+
+.setup-resume { overflow-y: auto; }
+.setup-resume > * { flex-shrink: 0; }
+
+#stepContent {
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+}
+
 .step-block {
-    @apply flex flex-col gap-4 h-full justify-center;
+    @apply flex flex-col gap-4;
+    min-height: 100%;
+}
+
+/* Auto margins center short steps but never move overflowing content above
+   the scroll origin. Each longer step can scroll all the way to its actions. */
+.step-block > * { flex-shrink: 0; }
+.step-block > :first-child { margin-top: auto; }
+.step-block > :last-child { margin-bottom: auto; }
+
+.license-step {
+    height: 100%;
+    min-height: 24rem;
+}
+
+.license-step .license-text {
+    flex: 1 1 8rem;
+    min-height: 8rem;
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overflow: auto;
+}
+
+@media (max-width: 960px) {
+    .setup-wizard { grid-template-columns: minmax(0, 1fr); }
+    .setup-artwork { display: none; }
 }
 
 .prerequisite-refresh-progress {
