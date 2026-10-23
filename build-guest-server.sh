@@ -6,9 +6,11 @@ echo "Building WinBoat guest binaries..."
 # Variables
 export GOOS=windows
 export GOARCH=amd64
-export VERSION="$(bun -p "require('./package.json').version")"
-export COMMIT_HASH="$(git rev-parse --short HEAD)"
-export BUILD_TIMESTAMP=$(date '+%Y-%m-%dT%H:%M:%S')
+BUN=${BUN:-bun}
+VERSION=$("$BUN" -p "require('./package.json').version")
+COMMIT_HASH=$(git rev-parse --short HEAD)
+BUILD_TIMESTAMP=$(date '+%Y-%m-%dT%H:%M:%S')
+export VERSION COMMIT_HASH BUILD_TIMESTAMP
 LDFLAGS=(
     "-X 'main.Version=${VERSION}'"
     "-X 'main.CommitHash=${COMMIT_HASH}'"

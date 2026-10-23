@@ -11,7 +11,10 @@
     "scripts": {
         "dev": "bun scripts/dev-server.ts",
         "build:gs": "bash build-guest-server.sh",
-        "build:linux-gs": "bash build-guest-server.sh && bun scripts/build.ts && electron-builder --linux"
+        "build:linux-gs": "bash build-guest-server.sh && bun scripts/build.ts && electron-builder --linux",
+        "check": "tsc --noEmit -p src/main && vue-tsc --noEmit --skipLibCheck -p src/renderer",
+        "test": "bun test",
+        "build:local": "bash scripts/build-local.sh"
     },
     "repository": "https://github.com/TibixDev/winboat",
     "author": {

@@ -11,8 +11,11 @@ export default function compile(directory) {
             process.stdout.write(Chalk.yellowBright(`[tsc] `) + Chalk.white(data.toString())),
         );
 
+        tscProcess.on("error", reject);
+        tscProcess.stderr!.pipe(process.stderr);
+
         tscProcess.on("exit", exitCode => {
-            if (exitCode ?? 1 > 0) {
+            if ((exitCode ?? 1) !== 0) {
                 reject(exitCode);
             } else {
                 resolve();

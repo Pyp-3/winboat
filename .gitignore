@@ -15,3 +15,8 @@ package-lock.json
 temp
 # Guest server build output (both binaries + update payload)
 guest_server/dist/
+# Local Python validation and visual QA artifacts
+__pycache__/
+*.pyc
+output/
+.playwright-cli/
